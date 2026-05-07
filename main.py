@@ -146,14 +146,14 @@ def format_stock_line(data):
         "06160":  33.284,
     }
     cost = cost_map.get(data["code"])
-    
-    # 第一行：名称、市场、代码
-    line1 = f"**{data['name']}**（{data['market']}）{data['code']}"
-    
+
+    # 第一行：名称、市场、代码（行尾加两个空格强制换行）
+    line1 = f"**{data['name']}**（{data['market']}）{data['code']}  "
+
     # 第二行：收盘价与涨跌幅
     arrow = "🔴↑" if data["pct_chg"] > 0 else "🟢↓"
-    line2 = f"收盘价：{data['close']:.3f}　{arrow} 今日涨跌：{data['pct_chg']:+.2f}%"
-    
+    line2 = f"收盘价：{data['close']:.3f}　{arrow} 今日涨跌：{data['pct_chg']:+.2f}%  "
+
     # 第三行：持仓盈亏与累计盈亏比例
     if cost is not None:
         diff = data["close"] - cost
@@ -162,12 +162,13 @@ def format_stock_line(data):
         line3 = f"{pl_emoji} 持仓盈亏：{diff:+.3f}　累计盈亏：{pct:+.2f}%"
     else:
         line3 = ""
-    
+
     lines = [line1, line2]
     if line3:
         lines.append(line3)
-    
-    return "\n".join(lines) + "\n"
+
+    # 用 \n 连接各行，每股之间空一行
+    return "\n".join(lines) + "\n\n"
 
 
 def main():

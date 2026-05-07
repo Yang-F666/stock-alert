@@ -2,8 +2,7 @@ name: Stock Alert
 
 on:
   schedule:
-    # 北京时间 16:35 自动运行（UTC 08:35），只周一到周五
-    cron: '35 08 * * 1-5'
+    - cron: '35 08 * * 1-5'
   workflow_dispatch:
 
 jobs:
@@ -14,7 +13,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: '3.10'
       - name: Install dependencies
         run: pip install tushare requests
       - name: Run script

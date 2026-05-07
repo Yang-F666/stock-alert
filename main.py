@@ -1,50 +1,226 @@
 # -*- coding: utf-8 -*-
-import tushare
+import akshare as ak
 import requests
 import os
 import datetime
+import time
 
-TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN")
 SERVERCHAN_KEY = os.getenv("SERVERCHAN_KEY")
 
-# ================== 你的股票列表（A股+港股） ==================
-STOCKS = [
-    ["600036.SH", 32.0],   # 招商银行
-    ["0700.HK", 380.0],    # 腾讯控股
-]
-# ============================================================
+# ========== 股票配置 ==========
+
+A_STOCKS = {
+    "688331": "荣昌生物",
+}
+
+HK_STOCKS = {
+    "01810": "小米集团-W",
+    "06862": "海底捞",
+    "09992": "泡泡玛特",
+    "06160": "荣昌生物",
+}
+
+# 成本价及预警规则
+ALERT_RULES = {
+    # A 股
+    "688331": [
+        {"name": "🔴 跌破成本价(102.97)", "condition": lambda row: row["close"] < 102.9694},
+        {"name": "🚀 涨幅超5%",           "condition": lambda row: row["pct_chg"] >= 5.0},
+        {"name": "⚠️ 跌幅超5%",           "condition": lambda row: row["pct_chg"] <= -5.0},
+    ],
+    # 港股
+    "01810": [
+        {"name": "🔴 跌破成本价(22.66)",  "condition": lambda row: row["close"] < 22.662},
+        {"name": "🚀 涨幅超5%",           "condition": lambda row: row["pct_chg"] >= 5.0},
+        {"name": "⚠️ 跌幅超5%",           "condition": lambda row: row["pct_chg"] <= -5.0},
+    ],
+    "06862": [
+        {"name": "🔴 跌破成本价(14.59)",  "condition": lambda row: row["close"] < 14.589},
+        {"name": "🚀 涨幅超5%",           "condition": lambda row: row["pct_chg"] >= 5.0},
+        {"name": "⚠️ 跌幅超5%",           "condition": lambda row: row["pct_chg"] <= -5.0},
+    ],
+    "09992": [
+        {"name": "🔴 跌破成本价(207.94)", "condition": lambda row: row["close"] < 207.94},
+        {"name": "🚀 涨幅超5%",           "condition": lambda row: row["pct_chg"] >= 5.0},
+        {"name": "⚠️ 跌幅超5%",           "condition": lambda row: row["pct_chg"] <= -5.0},
+    ],
+    "06160": [
+        {"name": "🔴 跌破成本价(33.28)",  "condition": lambda row: row["close"] < 33.284},
+        {"name": "🚀 涨幅超5%",           "condition": lambda row: row["pct_chg"] >= 5.0},
+        {"name": "⚠️ 跌幅超5%",           "condition": lambda row: row["pct_chg"] <= -5.0},
+    ],
+}
+
+# ==============================
+
 
 def send_wechat(title, content):
+    if not SERVERCHAN_KEY:
+        print(f"[预览推送]\n标题：{title}\n内容：{content}")
+        return
     url = f"https://sctapi.ftqq.com/{SERVERCHAN_KEY}.send"
     try:
-        requests.get(url, params={"title": title, "desp": content}, timeout=10)
-    except:
-        pass
+        resp = requests.get(url, params={"title": title, "desp": content}, timeout=10)
+        print(f"推送结果：{resp.json()}")
+    except Exception as e:
+        print(f"推送失败：{e}")
+
+
+def get_a_stock(code, name):
+    try:
+        today = datetime.date.today().strftime("%Y%m%d")
+        df = ak.stock_zh_a_hist(
+            symbol=code, period="daily",
+            start_date=today, end_date=today, adjust=""
+        )
+        if df.empty:
+            df = ak.stock_zh_a_hist(
+                symbol=code, period="daily",
+                start_date="20250101", end_date=today, adjust=""
+            )
+            if df.empty:
+                return None
+        row = df.iloc[-1]
+        return {
+            "name": name, "code": code, "market": "A股",
+            "date":    str(row["日期"]),
+            "close":   float(row["收盘"]),
+            "pct_chg": float(row["涨跌幅"]),
+            "high":    float(row["最高"]),
+            "low":     float(row["最低"]),
+            "open":    float(row["开盘"]),
+        }
+    except Exception as e:
+        print(f"[A股] {name}({code}) 获取失败：{e}")
+        return None
+
+
+def get_hk_stock(code, name):
+    try:
+        today = datetime.date.today().strftime("%Y%m%d")
+        df = ak.stock_hk_hist(
+            symbol=code, period="daily",
+            start_date=today, end_date=today, adjust=""
+        )
+        if df.empty:
+            df = ak.stock_hk_hist(
+                symbol=code, period="daily",
+                start_date="20250101", end_date=today, adjust=""
+            )
+            if df.empty:
+                return None
+        row = df.iloc[-1]
+        return {
+            "name": name, "code": code, "market": "港股",
+            "date":    str(row["日期"]),
+            "close":   float(row["收盘"]),
+            "pct_chg": float(row["涨跌幅"]),
+            "high":    float(row["最高"]),
+            "low":     float(row["最低"]),
+            "open":    float(row["开盘"]),
+        }
+    except Exception as e:
+        print(f"[港股] {name}({code}) 获取失败：{e}")
+        return None
+
+
+def check_alerts(data):
+    rules = ALERT_RULES.get(data["code"], [])
+    triggered = []
+    for rule in rules:
+        try:
+            if rule["condition"](data):
+                triggered.append(rule["name"])
+        except Exception as e:
+            print(f"规则执行异常：{e}")
+    return triggered
+
+
+def cost_diff(data):
+    """计算相对成本价的盈亏"""
+    cost_map = {
+        "688331": 102.9694,
+        "01810":  22.662,
+        "06862":  14.589,
+        "09992":  207.94,
+        "06160":  33.284,
+    }
+    cost = cost_map.get(data["code"])
+    if cost is None:
+        return ""
+    diff = data["close"] - cost
+    pct = (diff / cost) * 100
+    emoji = "📈" if diff >= 0 else "📉"
+    return f"{emoji} 持仓盈亏：{diff:+.3f}（{pct:+.2f}%）\n"
+
+
+def format_stock_line(data):
+    arrow = "🔴↑" if data["pct_chg"] > 0 else "🟢↓"
+    return (
+        f"**{data['name']}（{data['market']} {data['code']}）**\n"
+        f"收盘价：{data['close']:.3f}　{arrow} {data['pct_chg']:+.2f}%\n"
+        f"今日区间：{data['low']:.3f} ～ {data['high']:.3f}\n"
+        f"{cost_diff(data)}"
+    )
+
 
 def main():
-    tushare.set_token(TUSHARE_TOKEN)
-    pro = tushare.pro_api()
-    today = datetime.date.today().strftime("%Y%m%d")
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+    print(f"\n{'='*50}")
+    print(f"运行时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"{'='*50}\n")
 
-    msg = "【每日持仓收盘播报】\n"
-    msg += f"日期：{today}\n"
+    all_data = []
+    alert_items = []
 
-    for code, cost in STOCKS:
-        try:
-            df = pro.daily(ts_code=code, start_date=today, end_date=today)
-            if df.empty:
-                msg += f"\n{code}：今日无交易数据（非交易日或接口限制）\n"
-                continue
+    print("[ A 股 ]")
+    for code, name in A_STOCKS.items():
+        data = get_a_stock(code, name)
+        if data:
+            all_data.append(data)
+            triggered = check_alerts(data)
+            if triggered:
+                alert_items.append((data, triggered))
+            print(f"  ✅ {name}({code}) 收盘={data['close']:.2f} 涨跌={data['pct_chg']:+.2f}%")
+        else:
+            print(f"  ❌ {name}({code}) 获取失败")
+        time.sleep(1)
 
-            close = df.iloc[0]["close"]
-            profit = (close - cost) / cost * 100
-            msg += f"\n{code}：现价 {close:.2f}，成本 {cost:.2f}，盈亏 {profit:+.2f}%\n"
+    print("\n[ 港 股 ]")
+    for code, name in HK_STOCKS.items():
+        data = get_hk_stock(code, name)
+        if data:
+            all_data.append(data)
+            triggered = check_alerts(data)
+            if triggered:
+                alert_items.append((data, triggered))
+            print(f"  ✅ {name}({code}) 收盘={data['close']:.3f} 涨跌={data['pct_chg']:+.2f}%")
+        else:
+            print(f"  ❌ {name}({code}) 获取失败")
+        time.sleep(1)
 
-        except Exception as e:
-            msg += f"\n{code}：获取数据失败（{str(e)[:30]}...）\n"
+    # 预警推送
+    if alert_items:
+        alert_title = f"🚨 股票预警（{len(alert_items)} 条）{today_str}"
+        alert_body = ""
+        for data, rules in alert_items:
+            alert_body += format_stock_line(data)
+            alert_body += f"触发规则：{'、'.join(rules)}\n\n---\n\n"
+        send_wechat(alert_title, alert_body)
 
-    # 强制发送汇总消息
-    send_wechat("每日持仓播报", msg)
+    # 每日行情汇总
+    if all_data:
+        report_title = f"📈 每日行情 {today_str}"
+        report_body = ""
+        for data in all_data:
+            report_body += format_stock_line(data) + "\n"
+        report_body += f"\n> 更新时间：{datetime.datetime.now().strftime('%H:%M:%S')}"
+        send_wechat(report_title, report_body)
+    else:
+        send_wechat("股票脚本通知", f"{today_str} 今日无行情数据（可能为非交易日）")
+
+    print("\n✅ 执行完成")
+
 
 if __name__ == "__main__":
     main()

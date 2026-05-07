@@ -136,8 +136,8 @@ def check_alerts(data):
     return triggered
 
 
-def cost_diff(data):
-    """计算相对成本价的盈亏"""
+
+def format_stock_line(data):
     cost_map = {
         "688331": 102.9694,
         "01810":  22.662,
@@ -146,22 +146,28 @@ def cost_diff(data):
         "06160":  33.284,
     }
     cost = cost_map.get(data["code"])
-    if cost is None:
-        return ""
-    diff = data["close"] - cost
-    pct = (diff / cost) * 100
-    emoji = "📈" if diff >= 0 else "📉"
-    return f"{emoji} 持仓盈亏：{diff:+.3f}（{pct:+.2f}%）\n"
-
-
-def format_stock_line(data):
+    
+    # 第一行：名称、市场、代码
+    line1 = f"**{data['name']}**（{data['market']}）{data['code']}"
+    
+    # 第二行：收盘价与涨跌幅
     arrow = "🔴↑" if data["pct_chg"] > 0 else "🟢↓"
-    return (
-        f"**{data['name']}（{data['market']} {data['code']}）**\n"
-        f"收盘价：{data['close']:.3f}　{arrow} {data['pct_chg']:+.2f}%\n"
-        f"今日区间：{data['low']:.3f} ～ {data['high']:.3f}\n"
-        f"{cost_diff(data)}"
-    )
+    line2 = f"收盘价：{data['close']:.3f}　{arrow} 今日涨跌：{data['pct_chg']:+.2f}%"
+    
+    # 第三行：持仓盈亏与累计盈亏比例
+    if cost is not None:
+        diff = data["close"] - cost
+        pct  = (diff / cost) * 100
+        pl_emoji = "📈" if diff >= 0 else "📉"
+        line3 = f"{pl_emoji} 持仓盈亏：{diff:+.3f}　累计盈亏：{pct:+.2f}%"
+    else:
+        line3 = ""
+    
+    lines = [line1, line2]
+    if line3:
+        lines.append(line3)
+    
+    return "\n".join(lines) + "\n"
 
 
 def main():

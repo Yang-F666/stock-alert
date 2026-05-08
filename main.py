@@ -276,7 +276,7 @@ def main():
         report_body += f"\n> 更新时间：{datetime.datetime.now().strftime('%H:%M:%S')}"
         send_wechat(report_title, report_body)
     else:
-        send_wechat("股票脚本通知", f"{today_str} 今日无行情数据（可能为非交易日）")
+        send_wechat("股市休市通知", f"{today_str} 今日无行情数据（可能为非交易日）")
 
     print("\n✅ 执行完成")
 

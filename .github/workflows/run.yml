@@ -2,7 +2,7 @@ name: Stock Alert
 
 on:
   schedule:
-    - cron: '35 08 * * 1-5'
+ - cron: '0 09 * * 1-5'   # UTC 09:00 = 北京时间 17:00
   workflow_dispatch:
 
 jobs:

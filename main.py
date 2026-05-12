@@ -45,10 +45,6 @@ def send_wechat(title, content):
 
 
 def calc_macd(close_series, fast=12, slow=26, signal=9):
-    """
-    计算 MACD 指标
-    返回 (dif, dea, macd_bar) 三个 Series
-    """
     ema_fast = close_series.ewm(span=fast, adjust=False).mean()
     ema_slow = close_series.ewm(span=slow, adjust=False).mean()
     dif = ema_fast - ema_slow
@@ -58,17 +54,10 @@ def calc_macd(close_series, fast=12, slow=26, signal=9):
 
 
 def detect_macd_cross(dif: pd.Series, dea: pd.Series):
-    """
-    检测最近两根K线是否出现金叉或死叉
-    金叉：前一根 dif < dea，最新一根 dif > dea
-    死叉：前一根 dif > dea，最新一根 dif < dea
-    返回 'golden'（金叉）/ 'dead'（死叉）/ None
-    """
     if len(dif) < 2:
         return None
     prev_dif, curr_dif = dif.iloc[-2], dif.iloc[-1]
     prev_dea, curr_dea = dea.iloc[-2], dea.iloc[-1]
-
     if prev_dif < prev_dea and curr_dif > curr_dea:
         return "golden"
     if prev_dif > prev_dea and curr_dif < curr_dea:
@@ -77,50 +66,47 @@ def detect_macd_cross(dif: pd.Series, dea: pd.Series):
 
 
 def get_history(code, market, months=7):
-    """
-    获取近 months 个月的日线历史数据
-    返回 DataFrame，包含 close 列；失败返回 None
-    """
     end   = datetime.date.today()
-    # 多取一个月保证MACD有足够的预热数据
     start = (end - datetime.timedelta(days=months * 31)).strftime("%Y%m%d")
     end   = end.strftime("%Y%m%d")
 
-    try:
-        if market == "A股":
-            df = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=start, end_date=end, adjust=""
-            )
-            if df.empty:
-                return None
-            df = df.rename(columns={
-                "日期": "date", "开盘": "open", "收盘": "close",
-                "最高": "high", "最低": "low", "涨跌幅": "pct_chg"
-            })
-        else:
-            df = ak.stock_hk_hist(
-                symbol=code, period="daily",
-                start_date=start, end_date=end, adjust=""
-            )
-            if df.empty:
-                return None
-            df = df.rename(columns={
-                "日期": "date", "开盘": "open", "收盘": "close",
-                "最高": "high", "最低": "low", "涨跌幅": "pct_chg"
-            })
-        df["date"]    = pd.to_datetime(df["date"])
-        df["close"]   = df["close"].astype(float)
-        df["pct_chg"] = df["pct_chg"].astype(float)
-        df = df.sort_values("date").reset_index(drop=True)
-        return df
-    except Exception as e:
-        print(f"  历史数据获取失败 {code}: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            if market == "A股":
+                df = ak.stock_zh_a_hist(
+                    symbol=code, period="daily",
+                    start_date=start, end_date=end, adjust=""
+                )
+                if df.empty:
+                    return None
+                df = df.rename(columns={
+                    "日期": "date", "开盘": "open", "收盘": "close",
+                    "最高": "high", "最低": "low", "涨跌幅": "pct_chg"
+                })
+            else:
+                df = ak.stock_hk_hist(
+                    symbol=code, period="daily",
+                    start_date=start, end_date=end, adjust=""
+                )
+                if df.empty:
+                    return None
+                df = df.rename(columns={
+                    "日期": "date", "开盘": "open", "收盘": "close",
+                    "最高": "high", "最低": "low", "涨跌幅": "pct_chg"
+                })
+            df["date"]    = pd.to_datetime(df["date"])
+            df["close"]   = df["close"].astype(float)
+            df["pct_chg"] = df["pct_chg"].astype(float)
+            df = df.sort_values("date").reset_index(drop=True)
+            return df
+        except Exception as e:
+            print(f"  数据获取失败 {code} 第{attempt+1}次尝试: {e}")
+            if attempt < 2:
+                time.sleep(3)
+    return None
 
 
 def get_latest(df):
-    """从历史DataFrame取最新一行，构建行情dict"""
     row = df.iloc[-1]
     return {
         "close":   float(row["close"]),
@@ -130,23 +116,17 @@ def get_latest(df):
 
 
 def check_alerts(code, name, market, df):
-    """
-    执行三条预警规则，返回触发的预警文本列表
-    """
     alerts = []
     cost = COST_MAP.get(code)
     close = float(df.iloc[-1]["close"])
 
-    # ── 规则1 & 2：需要近6个月最高价 ──────────────────────────
-    # 取最近6个月（约126个交易日）的数据
     recent_6m = df.tail(126)
     high_6m   = recent_6m["close"].max()
 
     if cost is not None:
-        pnl_pct = (close - cost) / cost * 100        # 持仓盈亏比例
-        drop_from_high = (close - high_6m) / high_6m * 100  # 距最高点跌幅（负数）
+        pnl_pct = (close - cost) / cost * 100
+        drop_from_high = (close - high_6m) / high_6m * 100
 
-        # 规则1：盈利 且 从半年高点下跌超15%
         if pnl_pct > 0 and drop_from_high <= -15.0:
             alerts.append(
                 f"📉 **减仓提醒（30%）**\n"
@@ -155,7 +135,6 @@ def check_alerts(code, name, market, df):
                 f"建议减少 **30%** 仓位锁定部分利润"
             )
 
-        # 规则2：亏损 且 亏损超15%
         if pnl_pct <= -15.0:
             alerts.append(
                 f"🚨 **止损提醒（50%）**\n"
@@ -163,7 +142,6 @@ def check_alerts(code, name, market, df):
                 f"建议减少 **50%** 仓位控制风险"
             )
 
-    # ── 规则3：MACD 金叉 / 死叉 ──────────────────────────────
     dif, dea, _ = calc_macd(df["close"])
     cross = detect_macd_cross(dif, dea)
     if cross == "golden":
@@ -185,14 +163,10 @@ def check_alerts(code, name, market, df):
 def format_stock_line(data, code):
     cost = COST_MAP.get(code)
 
-    # 第一行：名称、市场、代码
     line1 = f"**{data['name']}**（{data['market']}）{code}  "
-
-    # 第二行：收盘价与涨跌幅
     arrow = "🔴↑" if data["pct_chg"] > 0 else "🟢↓"
     line2 = f"收盘价：{data['close']:.3f}　{arrow} 今日涨跌：{data['pct_chg']:+.2f}%  "
 
-    # 第三行：持仓盈亏
     if cost is not None:
         diff = data["close"] - cost
         pct  = (diff / cost) * 100
@@ -208,14 +182,17 @@ def format_stock_line(data, code):
 
 
 def process_stock(code, name, market):
-    """
-    拉取历史数据，提取最新行情，执行预警检查
-    返回 (行情dict, 预警列表) 或 (None, [])
-    """
     print(f"  处理 {name}({code})...")
     df = get_history(code, market)
     if df is None or df.empty:
-        print(f"    ❌ 数据获取失败")
+        print(f"    ❌ 数据获取失败（3次重试均失败）")
+        return None, []
+
+    latest_date = df.iloc[-1]["date"].date()
+    today = datetime.date.today()
+    days_diff = (today - latest_date).days
+    if days_diff > 5:
+        print(f"    ⚠️ 数据过旧（最新日期：{latest_date}），跳过")
         return None, []
 
     latest = get_latest(df)
@@ -233,8 +210,9 @@ def main():
     print(f"运行时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*50}\n")
 
-    all_data    = []   # (code, data_dict)
-    alert_items = []   # (code, name, market, alerts)
+    all_data      = []
+    alert_items   = []
+    failed_stocks = []
 
     print("[ A 股 ]")
     for code, name in A_STOCKS.items():
@@ -243,6 +221,8 @@ def main():
             all_data.append((code, data))
             if alerts:
                 alert_items.append((code, name, "A股", alerts))
+        else:
+            failed_stocks.append(f"{name}({code})")
         time.sleep(2)
 
     print("\n[ 港 股 ]")
@@ -252,9 +232,11 @@ def main():
             all_data.append((code, data))
             if alerts:
                 alert_items.append((code, name, "港股", alerts))
+        else:
+            failed_stocks.append(f"{name}({code})")
         time.sleep(2)
 
-    # ── 预警推送（有触发才发）──
+    # ── 预警推送 ──
     if alert_items:
         alert_title = f"🚨 操作提醒（{len(alert_items)} 只）{today_str}"
         alert_body  = ""
@@ -273,10 +255,18 @@ def main():
         report_body  = ""
         for code, data in all_data:
             report_body += format_stock_line(data, code)
+        if failed_stocks:
+            report_body += f"\n⚠️ 以下股票数据获取失败：{'、'.join(failed_stocks)}\n"
         report_body += f"\n> 更新时间：{datetime.datetime.now().strftime('%H:%M:%S')}"
         send_wechat(report_title, report_body)
     else:
-        send_wechat("股市休市通知", f"{today_str} 今日无行情数据（可能为非交易日）")
+        if failed_stocks:
+            send_wechat(
+                "⚠️ 数据获取异常",
+                f"{today_str} 所有股票数据获取失败，请检查网络或数据源。\n失败股票：{'、'.join(failed_stocks)}"
+            )
+        else:
+            send_wechat("股市休市通知", f"{today_str} 今日为非交易日，无行情数据。")
 
     print("\n✅ 执行完成")
 

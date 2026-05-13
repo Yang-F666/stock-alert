@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
+import baostock as bs
 import akshare as ak
 import requests
 import os
 import datetime
 import time
 import pandas as pd
-
-# ✅ 通过环境变量给 akshare 底层设置请求头
-os.environ["AKSHARE_TIMEOUT"] = "60"
 
 SERVERCHAN_KEY = os.getenv("SERVERCHAN_KEY")
 
@@ -68,44 +66,123 @@ def detect_macd_cross(dif: pd.Series, dea: pd.Series):
     return None
 
 
-def get_history(code, market, months=7):
+def get_history_a(code, months=7):
+    """A股：优先BaoStock，失败切换AkShare"""
     end   = datetime.date.today()
-    start = (end - datetime.timedelta(days=months * 31)).strftime("%Y%m%d")
-    end   = end.strftime("%Y%m%d")
+    start = end - datetime.timedelta(days=months * 31)
 
-    for attempt in range(3):
-        try:
-            if market == "A股":
-                df = ak.stock_zh_a_hist(
-                    symbol=code, period="daily",
-                    start_date=start, end_date=end, adjust=""
-                )
-                if df.empty:
-                    return None
-                df = df.rename(columns={
-                    "日期": "date", "开盘": "open", "收盘": "close",
-                    "最高": "high", "最低": "low", "涨跌幅": "pct_chg"
-                })
-            else:
-                df = ak.stock_hk_hist(
-                    symbol=code, period="daily",
-                    start_date=start, end_date=end, adjust=""
-                )
-                if df.empty:
-                    return None
-                df = df.rename(columns={
-                    "日期": "date", "开盘": "open", "收盘": "close",
-                    "最高": "high", "最低": "low", "涨跌幅": "pct_chg"
-                })
+    # BaoStock：代码格式 sh.688331 / sz.000001
+    prefix = "sh" if code.startswith(("6", "5")) else "sz"
+    bs_code = f"{prefix}.{code}"
+
+    try:
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            "date,open,high,low,close,pctChg",
+            start_date=start.strftime("%Y-%m-%d"),
+            end_date=end.strftime("%Y-%m-%d"),
+            frequency="d",
+            adjustflag="3"
+        )
+        rows = []
+        while (rs.error_code == "0") and rs.next():
+            rows.append(rs.get_row_data())
+        if rows:
+            df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "pct_chg"])
+            df = df[df["close"] != ""]
             df["date"]    = pd.to_datetime(df["date"])
             df["close"]   = df["close"].astype(float)
             df["pct_chg"] = df["pct_chg"].astype(float)
             df = df.sort_values("date").reset_index(drop=True)
+            print(f"    [BaoStock] A股数据获取成功")
             return df
+    except Exception as e:
+        print(f"    [BaoStock] A股失败: {e}")
+
+    # 备用：AkShare
+    print(f"    [AkShare] 尝试获取A股数据...")
+    for attempt in range(3):
+        try:
+            df = ak.stock_zh_a_hist(
+                symbol=code, period="daily",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+                adjust=""
+            )
+            if not df.empty:
+                df = df.rename(columns={
+                    "日期": "date", "收盘": "close", "涨跌幅": "pct_chg",
+                    "开盘": "open", "最高": "high", "最低": "low"
+                })
+                df["date"]    = pd.to_datetime(df["date"])
+                df["close"]   = df["close"].astype(float)
+                df["pct_chg"] = df["pct_chg"].astype(float)
+                df = df.sort_values("date").reset_index(drop=True)
+                print(f"    [AkShare] A股数据获取成功")
+                return df
         except Exception as e:
-            print(f"  数据获取失败 {code} 第{attempt+1}次尝试: {e}")
+            print(f"    [AkShare] 第{attempt+1}次失败: {e}")
             if attempt < 2:
                 time.sleep(5 * (attempt + 1))
+    return None
+
+
+def get_history_hk(code, months=7):
+    """港股：优先AkShare，失败切换BaoStock"""
+    end   = datetime.date.today()
+    start = end - datetime.timedelta(days=months * 31)
+
+    # 优先AkShare
+    for attempt in range(3):
+        try:
+            df = ak.stock_hk_hist(
+                symbol=code, period="daily",
+                start_date=start.strftime("%Y%m%d"),
+                end_date=end.strftime("%Y%m%d"),
+                adjust=""
+            )
+            if not df.empty:
+                df = df.rename(columns={
+                    "日期": "date", "收盘": "close", "涨跌幅": "pct_chg",
+                    "开盘": "open", "最高": "high", "最低": "low"
+                })
+                df["date"]    = pd.to_datetime(df["date"])
+                df["close"]   = df["close"].astype(float)
+                df["pct_chg"] = df["pct_chg"].astype(float)
+                df = df.sort_values("date").reset_index(drop=True)
+                print(f"    [AkShare] 港股数据获取成功")
+                return df
+        except Exception as e:
+            print(f"    [AkShare] 港股第{attempt+1}次失败: {e}")
+            if attempt < 2:
+                time.sleep(5 * (attempt + 1))
+
+    # 备用：BaoStock港股
+    print(f"    [BaoStock] 尝试获取港股数据...")
+    try:
+        bs_code = f"hk.{code}"
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            "date,open,high,low,close,pctChg",
+            start_date=start.strftime("%Y-%m-%d"),
+            end_date=end.strftime("%Y-%m-%d"),
+            frequency="d"
+        )
+        rows = []
+        while (rs.error_code == "0") and rs.next():
+            rows.append(rs.get_row_data())
+        if rows:
+            df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "pct_chg"])
+            df = df[df["close"] != ""]
+            df["date"]    = pd.to_datetime(df["date"])
+            df["close"]   = df["close"].astype(float)
+            df["pct_chg"] = df["pct_chg"].astype(float)
+            df = df.sort_values("date").reset_index(drop=True)
+            print(f"    [BaoStock] 港股数据获取成功")
+            return df
+    except Exception as e:
+        print(f"    [BaoStock] 港股失败: {e}")
+
     return None
 
 
@@ -120,14 +197,14 @@ def get_latest(df):
 
 def check_alerts(code, name, market, df):
     alerts = []
-    cost = COST_MAP.get(code)
+    cost  = COST_MAP.get(code)
     close = float(df.iloc[-1]["close"])
 
     recent_6m = df.tail(126)
     high_6m   = recent_6m["close"].max()
 
     if cost is not None:
-        pnl_pct = (close - cost) / cost * 100
+        pnl_pct        = (close - cost) / cost * 100
         drop_from_high = (close - high_6m) / high_6m * 100
 
         if pnl_pct > 0 and drop_from_high <= -15.0:
@@ -186,14 +263,19 @@ def format_stock_line(data, code):
 
 def process_stock(code, name, market):
     print(f"  处理 {name}({code})...")
-    df = get_history(code, market)
+
+    if market == "A股":
+        df = get_history_a(code)
+    else:
+        df = get_history_hk(code)
+
     if df is None or df.empty:
-        print(f"    ❌ 数据获取失败（3次重试均失败）")
+        print(f"    ❌ 数据获取失败（双数据源均失败）")
         return None, []
 
     latest_date = df.iloc[-1]["date"].date()
-    today = datetime.date.today()
-    days_diff = (today - latest_date).days
+    today       = datetime.date.today()
+    days_diff   = (today - latest_date).days
     if days_diff > 5:
         print(f"    ⚠️ 数据过旧（最新日期：{latest_date}），跳过")
         return None, []
@@ -213,11 +295,19 @@ def main():
     print(f"运行时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*50}\n")
 
+    # BaoStock 登录
+    print("BaoStock 登录...")
+    lg = bs.login()
+    if lg.error_code != "0":
+        print(f"BaoStock 登录失败: {lg.error_msg}（不影响AkShare数据源）")
+    else:
+        print("BaoStock 登录成功")
+
     all_data      = []
     alert_items   = []
     failed_stocks = []
 
-    print("[ A 股 ]")
+    print("\n[ A 股 ]")
     for code, name in A_STOCKS.items():
         data, alerts = process_stock(code, name, "A股")
         if data:
@@ -226,7 +316,7 @@ def main():
                 alert_items.append((code, name, "A股", alerts))
         else:
             failed_stocks.append(f"{name}({code})")
-        time.sleep(5)
+        time.sleep(3)
 
     print("\n[ 港 股 ]")
     for code, name in HK_STOCKS.items():
@@ -237,7 +327,10 @@ def main():
                 alert_items.append((code, name, "港股", alerts))
         else:
             failed_stocks.append(f"{name}({code})")
-        time.sleep(5)
+        time.sleep(3)
+
+    # BaoStock 登出
+    bs.logout()
 
     # ── 预警推送 ──
     if alert_items:
@@ -266,7 +359,7 @@ def main():
         if failed_stocks:
             send_wechat(
                 "⚠️ 数据获取异常",
-                f"{today_str} 所有股票数据获取失败，请检查网络或数据源。\n失败股票：{'、'.join(failed_stocks)}"
+                f"{today_str} 所有股票数据获取失败。\n失败股票：{'、'.join(failed_stocks)}"
             )
         else:
             send_wechat("股市休市通知", f"{today_str} 今日为非交易日，无行情数据。")

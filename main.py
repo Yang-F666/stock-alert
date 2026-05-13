@@ -6,6 +6,13 @@ import datetime
 import time
 import pandas as pd
 
+# ✅ 设置请求头，伪装成浏览器，避免东方财富反爬拦截
+ak.requests_session.headers.update({
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Referer": "https://finance.eastmoney.com/",
+    "Accept-Language": "zh-CN,zh;q=0.9",
+})
+
 SERVERCHAN_KEY = os.getenv("SERVERCHAN_KEY")
 
 # ========== 股票配置 ==========
@@ -102,7 +109,8 @@ def get_history(code, market, months=7):
         except Exception as e:
             print(f"  数据获取失败 {code} 第{attempt+1}次尝试: {e}")
             if attempt < 2:
-                time.sleep(3)
+                # ✅ 每次重试前等待时间递增：5秒、10秒
+                time.sleep(5 * (attempt + 1))
     return None
 
 
@@ -223,7 +231,7 @@ def main():
                 alert_items.append((code, name, "A股", alerts))
         else:
             failed_stocks.append(f"{name}({code})")
-        time.sleep(2)
+        time.sleep(5)  # ✅ 每只股票之间等待5秒
 
     print("\n[ 港 股 ]")
     for code, name in HK_STOCKS.items():
@@ -234,7 +242,7 @@ def main():
                 alert_items.append((code, name, "港股", alerts))
         else:
             failed_stocks.append(f"{name}({code})")
-        time.sleep(2)
+        time.sleep(5)  # ✅ 每只股票之间等待5秒
 
     # ── 预警推送 ──
     if alert_items:

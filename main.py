@@ -17,7 +17,6 @@ A_STOCKS = {
 
 HK_STOCKS = {
     "01810": "小米集团-W",
-    "06862": "海底捞",
     "09992": "泡泡玛特",
     "09995": "荣昌生物",
 }
@@ -25,7 +24,6 @@ HK_STOCKS = {
 COST_MAP = {
     "688331": 102.9694,
     "01810":  22.624,
-    "06862":  14.589,
     "09992":  207.94,
     "09995":  33.284,
 }
@@ -71,8 +69,7 @@ def get_history_a(code, months=7):
     end   = datetime.date.today()
     start = end - datetime.timedelta(days=months * 31)
 
-    # BaoStock：代码格式 sh.688331 / sz.000001
-    prefix = "sh" if code.startswith(("6", "5")) else "sz"
+    prefix  = "sh" if code.startswith(("6", "5")) else "sz"
     bs_code = f"{prefix}.{code}"
 
     try:
@@ -99,7 +96,6 @@ def get_history_a(code, months=7):
     except Exception as e:
         print(f"    [BaoStock] A股失败: {e}")
 
-    # 备用：AkShare
     print(f"    [AkShare] 尝试获取A股数据...")
     for attempt in range(3):
         try:
@@ -128,11 +124,10 @@ def get_history_a(code, months=7):
 
 
 def get_history_hk(code, months=7):
-    """港股：优先AkShare，失败切换BaoStock"""
+    """港股：东方财富接口优先，失败切换新浪财经接口"""
     end   = datetime.date.today()
     start = end - datetime.timedelta(days=months * 31)
 
-    # 优先AkShare
     for attempt in range(3):
         try:
             df = ak.stock_hk_hist(
@@ -150,38 +145,33 @@ def get_history_hk(code, months=7):
                 df["close"]   = df["close"].astype(float)
                 df["pct_chg"] = df["pct_chg"].astype(float)
                 df = df.sort_values("date").reset_index(drop=True)
-                print(f"    [AkShare] 港股数据获取成功")
+                print(f"    [东方财富] 港股数据获取成功")
                 return df
         except Exception as e:
-            print(f"    [AkShare] 港股第{attempt+1}次失败: {e}")
+            print(f"    [东方财富] 港股第{attempt+1}次失败: {e}")
             if attempt < 2:
                 time.sleep(5 * (attempt + 1))
 
-    # 备用：BaoStock港股
-    print(f"    [BaoStock] 尝试获取港股数据...")
+    print(f"    [新浪财经] 尝试获取港股数据...")
     try:
-        bs_code = f"hk.{code}"
-        rs = bs.query_history_k_data_plus(
-            bs_code,
-            "date,open,high,low,close,pctChg",
-            start_date=start.strftime("%Y-%m-%d"),
-            end_date=end.strftime("%Y-%m-%d"),
-            frequency="d"
-        )
-        rows = []
-        while (rs.error_code == "0") and rs.next():
-            rows.append(rs.get_row_data())
-        if rows:
-            df = pd.DataFrame(rows, columns=["date", "open", "high", "low", "close", "pct_chg"])
-            df = df[df["close"] != ""]
+        symbol = f"hk{code}"
+        df = ak.stock_hk_daily(symbol=symbol, adjust="")
+        if df is not None and not df.empty:
+            df = df.rename(columns={
+                "date": "date", "close": "close", "open": "open",
+                "high": "high", "low": "low"
+            })
             df["date"]    = pd.to_datetime(df["date"])
             df["close"]   = df["close"].astype(float)
-            df["pct_chg"] = df["pct_chg"].astype(float)
+            df["pct_chg"] = df["close"].pct_change() * 100
+            df["pct_chg"] = df["pct_chg"].fillna(0)
+            df = df[df["date"] >= pd.to_datetime(start)]
             df = df.sort_values("date").reset_index(drop=True)
-            print(f"    [BaoStock] 港股数据获取成功")
-            return df
+            if not df.empty:
+                print(f"    [新浪财经] 港股数据获取成功")
+                return df
     except Exception as e:
-        print(f"    [BaoStock] 港股失败: {e}")
+        print(f"    [新浪财经] 港股失败: {e}")
 
     return None
 
@@ -207,7 +197,8 @@ def check_alerts(code, name, market, df):
         pnl_pct        = (close - cost) / cost * 100
         drop_from_high = (close - high_6m) / high_6m * 100
 
-        if pnl_pct > 0 and drop_from_high <= -15.0:
+        # 规则1：盈利 且 从半年高点下跌 ≥ 15%
+        if pnl_pct > 0 and drop_from_high <= -15.0 and drop_from_high > -25.0:
             alerts.append(
                 f"📉 **减仓提醒（30%）**\n"
                 f"当前盈利 {pnl_pct:+.2f}%，"
@@ -215,6 +206,7 @@ def check_alerts(code, name, market, df):
                 f"建议减少 **30%** 仓位锁定部分利润"
             )
 
+        # 规则2：亏损 且 亏损 ≥ 15%
         if pnl_pct <= -15.0:
             alerts.append(
                 f"🚨 **止损提醒（50%）**\n"
@@ -222,6 +214,16 @@ def check_alerts(code, name, market, df):
                 f"建议减少 **50%** 仓位控制风险"
             )
 
+        # 规则4：盈利 且 从半年高点下跌 ≥ 25%
+        if pnl_pct > 0 and drop_from_high <= -25.0:
+            alerts.append(
+                f"🔴 **清仓提醒**\n"
+                f"当前盈利 {pnl_pct:+.2f}%，"
+                f"但已从近半年高点（{high_6m:.3f}）下跌 {drop_from_high:.2f}%\n"
+                f"建议 **清仓** 保留利润"
+            )
+
+    # 规则3：MACD 金叉 / 死叉
     dif, dea, _ = calc_macd(df["close"])
     cross = detect_macd_cross(dif, dea)
     if cross == "golden":
@@ -295,11 +297,10 @@ def main():
     print(f"运行时间：{datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"{'='*50}\n")
 
-    # BaoStock 登录
     print("BaoStock 登录...")
     lg = bs.login()
     if lg.error_code != "0":
-        print(f"BaoStock 登录失败: {lg.error_msg}（不影响AkShare数据源）")
+        print(f"BaoStock 登录失败: {lg.error_msg}")
     else:
         print("BaoStock 登录成功")
 
@@ -329,7 +330,6 @@ def main():
             failed_stocks.append(f"{name}({code})")
         time.sleep(3)
 
-    # BaoStock 登出
     bs.logout()
 
     # ── 预警推送 ──

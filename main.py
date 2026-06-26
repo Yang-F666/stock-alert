@@ -2,6 +2,9 @@
 import baostock as bs
 import akshare as ak
 import requests
+import subprocess
+import json
+from urllib.parse import urlencode
 import os
 import datetime
 import time
@@ -13,19 +16,21 @@ SERVERCHAN_KEY = os.getenv("SERVERCHAN_KEY")
 
 A_STOCKS = {
     "688331": "荣昌生物",
+    "000021": "深科技",
+    "300759": "康龙化成",
 }
 
 HK_STOCKS = {
     "01810": "小米集团-W",
     "09992": "泡泡玛特",
-    "09995": "荣昌生物",
 }
 
 COST_MAP = {
-    "688331": 102.9694,
-    "01810":  22.624,
-    "09992":  207.94,
-    "09995":  33.284,
+    "688331": 115.5149,
+    "000021": 40.608,
+    "300759": 25.3617,
+    "01810":  23.279,
+    "09992":  206.038,
 }
 
 # ==============================
@@ -64,14 +69,89 @@ def detect_macd_cross(dif: pd.Series, dea: pd.Series):
     return None
 
 
+def fetch_eastmoney_via_curl(symbol, start_date, end_date, adjust="", period="daily"):
+    """
+    用系统 curl 命令直接调用东财 API，绕过 Python requests 被识别的问题
+    适用于 A股 和 港股
+    """
+    # A股市场代码判断
+    if symbol.isdigit() and len(symbol) == 6:
+        market_code = 1 if symbol.startswith(("6", "5")) else 0
+        secid = f"{market_code}.{symbol}"
+    else:
+        # 港股：代码格式如 01810，东财用 116.01810
+        secid = f"116.{symbol}"
+
+    adjust_dict = {"qfq": "1", "hfq": "2", "": "0"}
+    period_dict = {"daily": "101", "weekly": "102", "monthly": "103"}
+
+    params = {
+        "fields1": "f1,f2,f3,f4,f5,f6",
+        "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f116",
+        "ut": "7eea3edcaed734bea9cbfc24409ed989",
+        "klt": period_dict.get(period, "101"),
+        "fqt": adjust_dict.get(adjust, "0"),
+        "secid": secid,
+        "beg": start_date,
+        "end": end_date,
+    }
+
+    base_url = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
+    full_url = f"{base_url}?{urlencode(params)}"
+
+    cmd = [
+        "curl", "-s", "--compressed",
+        "-A", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "-H", "Referer: https://finance.eastmoney.com/",
+        "-H", "Accept-Language: zh-CN,zh;q=0.9",
+        "--max-time", "30",
+        full_url
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        data_json = json.loads(result.stdout)
+
+        if not (data_json.get("data") and data_json["data"].get("klines")):
+            return None
+
+        rows = [item.split(",") for item in data_json["data"]["klines"]]
+        df = pd.DataFrame(rows, columns=[
+            "date", "open", "close", "high", "low",
+            "volume", "amount", "amplitude", "pct_chg", "change", "turnover"
+        ])
+        df["date"]    = pd.to_datetime(df["date"])
+        df["close"]   = pd.to_numeric(df["close"], errors="coerce")
+        df["pct_chg"] = pd.to_numeric(df["pct_chg"], errors="coerce")
+        df["open"]    = pd.to_numeric(df["open"], errors="coerce")
+        df["high"]    = pd.to_numeric(df["high"], errors="coerce")
+        df["low"]     = pd.to_numeric(df["low"], errors="coerce")
+        df = df.sort_values("date").reset_index(drop=True)
+        return df
+
+    except Exception as e:
+        print(f"    [curl] 失败: {e}")
+        return None
+
+
 def get_history_a(code, months=7):
-    """A股：优先BaoStock，失败切换AkShare"""
+    """A股：优先 curl 直调东财，失败切换 BaoStock"""
     end   = datetime.date.today()
     start = end - datetime.timedelta(days=months * 31)
+    start_str = start.strftime("%Y%m%d")
+    end_str   = end.strftime("%Y%m%d")
 
+    # 优先：curl 直调东财
+    print(f"    [curl东财] 尝试获取A股数据...")
+    df = fetch_eastmoney_via_curl(code, start_str, end_str)
+    if df is not None and not df.empty:
+        print(f"    [curl东财] A股数据获取成功")
+        return df
+
+    # 备用：BaoStock
+    print(f"    [BaoStock] 尝试获取A股数据...")
     prefix  = "sh" if code.startswith(("6", "5")) else "sz"
     bs_code = f"{prefix}.{code}"
-
     try:
         rs = bs.query_history_k_data_plus(
             bs_code,
@@ -94,72 +174,34 @@ def get_history_a(code, months=7):
             print(f"    [BaoStock] A股数据获取成功")
             return df
     except Exception as e:
-        print(f"    [BaoStock] A股失败: {e}")
+        print(f"    [BaoStock] 失败: {e}")
 
-    print(f"    [AkShare] 尝试获取A股数据...")
-    for attempt in range(3):
-        try:
-            df = ak.stock_zh_a_hist(
-                symbol=code, period="daily",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-                adjust=""
-            )
-            if not df.empty:
-                df = df.rename(columns={
-                    "日期": "date", "收盘": "close", "涨跌幅": "pct_chg",
-                    "开盘": "open", "最高": "high", "最低": "low"
-                })
-                df["date"]    = pd.to_datetime(df["date"])
-                df["close"]   = df["close"].astype(float)
-                df["pct_chg"] = df["pct_chg"].astype(float)
-                df = df.sort_values("date").reset_index(drop=True)
-                print(f"    [AkShare] A股数据获取成功")
-                return df
-        except Exception as e:
-            print(f"    [AkShare] 第{attempt+1}次失败: {e}")
-            if attempt < 2:
-                time.sleep(5 * (attempt + 1))
     return None
 
 
 def get_history_hk(code, months=7):
-    """港股：东方财富接口优先，失败切换新浪财经接口"""
+    """港股：优先 curl 直调东财，失败切换新浪接口"""
     end   = datetime.date.today()
     start = end - datetime.timedelta(days=months * 31)
+    start_str = start.strftime("%Y%m%d")
+    end_str   = end.strftime("%Y%m%d")
 
-    for attempt in range(3):
-        try:
-            df = ak.stock_hk_hist(
-                symbol=code, period="daily",
-                start_date=start.strftime("%Y%m%d"),
-                end_date=end.strftime("%Y%m%d"),
-                adjust=""
-            )
-            if not df.empty:
-                df = df.rename(columns={
-                    "日期": "date", "收盘": "close", "涨跌幅": "pct_chg",
-                    "开盘": "open", "最高": "high", "最低": "low"
-                })
-                df["date"]    = pd.to_datetime(df["date"])
-                df["close"]   = df["close"].astype(float)
-                df["pct_chg"] = df["pct_chg"].astype(float)
-                df = df.sort_values("date").reset_index(drop=True)
-                print(f"    [东方财富] 港股数据获取成功")
-                return df
-        except Exception as e:
-            print(f"    [东方财富] 港股第{attempt+1}次失败: {e}")
-            if attempt < 2:
-                time.sleep(5 * (attempt + 1))
+    # 优先：curl 直调东财港股
+    print(f"    [curl东财] 尝试获取港股数据...")
+    df = fetch_eastmoney_via_curl(code, start_str, end_str)
+    if df is not None and not df.empty:
+        print(f"    [curl东财] 港股数据获取成功")
+        return df
 
+    # 备用：新浪财经
     print(f"    [新浪财经] 尝试获取港股数据...")
     try:
         symbol = f"hk{code}"
         df = ak.stock_hk_daily(symbol=symbol, adjust="")
         if df is not None and not df.empty:
             df = df.rename(columns={
-                "date": "date", "close": "close", "open": "open",
-                "high": "high", "low": "low"
+                "date": "date", "close": "close",
+                "open": "open", "high": "high", "low": "low"
             })
             df["date"]    = pd.to_datetime(df["date"])
             df["close"]   = df["close"].astype(float)
@@ -171,7 +213,7 @@ def get_history_hk(code, months=7):
                 print(f"    [新浪财经] 港股数据获取成功")
                 return df
     except Exception as e:
-        print(f"    [新浪财经] 港股失败: {e}")
+        print(f"    [新浪财经] 失败: {e}")
 
     return None
 
@@ -197,7 +239,7 @@ def check_alerts(code, name, market, df):
         pnl_pct        = (close - cost) / cost * 100
         drop_from_high = (close - high_6m) / high_6m * 100
 
-        # 规则1：盈利 且 从半年高点下跌 ≥ 15%
+        # 规则1：盈利 且 从半年高点下跌 ≥ 15%（不超过25%）
         if pnl_pct > 0 and drop_from_high <= -15.0 and drop_from_high > -25.0:
             alerts.append(
                 f"📉 **减仓提醒（30%）**\n"
@@ -272,7 +314,7 @@ def process_stock(code, name, market):
         df = get_history_hk(code)
 
     if df is None or df.empty:
-        print(f"    ❌ 数据获取失败（双数据源均失败）")
+        print(f"    ❌ 数据获取失败（所有数据源均失败）")
         return None, []
 
     latest_date = df.iloc[-1]["date"].date()
